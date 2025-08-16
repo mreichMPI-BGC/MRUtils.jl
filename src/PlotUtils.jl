@@ -119,8 +119,8 @@ function plot3d!(dv::DensityVol; ax=current_axis(), trans_fun=log10,
 
     if obs_samplesize > 0
         @info "Sampling $obs_samplesize observation points for scatter plot"
-        obs_sample = sample(dv.obs_points, minimum(obs_samplesize, length(dv.obs_points)))  
-        scatter!(ax, dv.obs_points, color=:blue, markersize=5, alpha=0.5)
+        obs_sample = sample(dv.obs_points, min(obs_samplesize, length(dv.obs_points)))  
+        scatter!(ax, obs_sample, color=:blue, markersize=5, alpha=0.5)
 
     else
         @info "No observation points sampled for scatter plot"
