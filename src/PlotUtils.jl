@@ -115,9 +115,17 @@ function kde3d_est(x::Vector, y::Vector, z::Vector; bandwidth_rule::Symbol = :si
 end
 
 function plot3d!(dv::DensityVol; ax=current_axis(), trans_fun=log10,
-  levels=[10,50,90], from_grid=true, kwargs...)
-    scatter!(ax, dv.obs_points, color=:blue, markersize=5, alpha=0.5)
+  levels=[10,50,90], from_grid=true, obs_samplesize=500,  kwargs...)
 
+    if obs_samplesize > 0
+        @info "Sampling $obs_samplesize observation points for scatter plot"
+        obs_sample = sample(dv.obs_points, minimum(obs_samplesize, length(dv.obs_points)))  
+        scatter!(ax, dv.obs_points, color=:blue, markersize=5, alpha=0.5)
+
+    else
+        @info "No observation points sampled for scatter plot"
+    end
+    
     # Extract levels from dv
     pdf_levels = from_grid ? dv.levels_grid : dv.levels_obs
     pdf_levels = [pdf_levels[l] for l in levels]
