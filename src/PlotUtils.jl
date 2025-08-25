@@ -5,7 +5,9 @@ using Distributions: pdf
 using Base.Iterators: cycle, product
 
 export wireframe4vec!, kde3d_est, test_gaussian_mix_3d_mass_plot, test_gaussian_3d_mass_plot, figax
-export contourmesh!, plot3d!
+export contourmesh!, plot3d!, swapdraw!
+
+_asobs(x) = x isa Observable ? x : Observable(x)
 
 function figax(; size=(1920, 1080), show_axis=true, axis3=true, kwargs...)
     fig = Figure(size=size)
@@ -15,12 +17,62 @@ function figax(; size=(1920, 1080), show_axis=true, axis3=true, kwargs...)
     return fig, ax
 end
 
-function contourmesh!(ax, vol, level::Number; xrange=[], yrange=[], zrange=[], kwargs...)
-    m = MC(vol; x=xrange |> collect, y=yrange |> collect, z=zrange |> collect)
-    march(m, level)
-    msh = MarchingCubes.makemesh(Makie.GeometryBasics, m)
-    return mesh!(ax, msh; kwargs...)
+
+```
+swapdraw! for smoother animation if whole plot has to be redone, e.g.
+  i2 = Observable(1)
+fig, ax = figax(viewmode=:fitzoom);fig
+limits!(ax, (-5,15), (-5, 15), (-5, 15))
+#@lift @redraw ax begin
+@lift swapdraw!(ax) do
+  plot3d!(kdePerMonth[$i2] , levels=[20,50,80], from_grid=true, specular=5., obs_samplesize=0)   
 end
+for ii in 1:12; i2[]=ii; sleep(0.5); end
+```
+
+const _BUF = IdDict{Any, Vector{AbstractPlot}}()  # per-axis state
+
+  function swapdraw!(f::Function, ax)
+      # old buffer (may be empty)
+      old = get!(_BUF, ax, AbstractPlot[])
+      oldLim = ax.limits[]
+
+      # draw new plots invisibly and collect them via diff
+      before = Set(copy(ax.scene.plots))
+      f()  # your plot3d! call(s)
+      after = Set(copy(ax.scene.plots))
+      new = collect(setdiff(after, before))
+      limits!(ax, oldLim...)
+      # hide new, show old for now
+      for p in new; p.visible[] = false; end
+      for p in old; p.visible[] = true;  end
+
+      # flip on next frame and delete old
+      @async begin
+          yield()                          # let one frame render
+          for p in old; p.visible[] = false; delete!(ax, p); end
+          for p in new; p.visible[] = true;  end
+      end
+
+      _BUF[ax] = new
+      nothing
+  end
+
+function contourmesh!(ax, vol::Observable, level::Observable; xrange=[], yrange=[], zrange=[], kwargs...)
+    xr = _asobs(xrange); yr = _asobs(yrange); zr = _asobs(zrange)
+    mesh_geo = @lift begin
+      m = MC($vol; x=$xr |> collect, y=$yr |> collect, z=$zr |> collect)
+      march(m, $level)
+      MarchingCubes.makemesh(Makie.GeometryBasics, m)
+    end
+    return mesh!(ax, mesh_geo; kwargs...)
+end
+
+# plain arrays/levels just delegate by wrapping
+function contourmesh!(ax, vol::AbstractArray, level::Number; kwargs...)
+    contourmesh!(ax, _asobs(vol), _asobs(Float(level)); kwargs...)
+end
+
 
 function contourmesh!(ax, vol, levels::AbstractVector = quantile(vol, [0.1, 0.5, 0.9]); 
         alphas=[1, 0.5, 0.2], colors=[:red, :orange, :yellow], kwargs...)
@@ -114,28 +166,61 @@ function kde3d_est(x::Vector, y::Vector, z::Vector; bandwidth_rule::Symbol = :si
     
 end
 
-function plot3d!(dv::DensityVol; ax=current_axis(), trans_fun=log10,
-  levels=[10,50,90], from_grid=true, obs_samplesize=500,  kwargs...)
+function plot3d!(dv::Observable{<:DensityVol}; ax=current_axis(), trans_fun::Observable{<:Function}=Observable(log10),
+  levels::AbstractVector{<:Observable{<:Real}}=Observable.([10.,50.,90.]), 
+  from_grid::Observable{Bool}=Observable(true), 
+  obs_samplesize::Observable{Int}=Observable(500),  
+  colors = [:red, :orange, :yellow],
+  alphas = [0.5, 0.25, 0.125],
+  kwargs...)
 
-    if obs_samplesize > 0
-        @info "Sampling $obs_samplesize observation points for scatter plot"
-        obs_sample = sample(dv.obs_points, min(obs_samplesize, length(dv.obs_points)))  
-        scatter!(ax, obs_sample, color=:blue, markersize=5, alpha=0.5)
-
-    else
-        @info "No observation points sampled for scatter plot"
-    end
+   
     
+    vol_obs = @lift $trans_fun.($dv.pdf_vol)
+    pdf_levels = @lift $from_grid ? $dv.levels_grid : $dv.levels_obs
+    pdf_levels = [@lift $trans_fun($pdf_levels[$lev]) for lev in levels] 
     # Extract levels from dv
-    pdf_levels = from_grid ? dv.levels_grid : dv.levels_obs
-    pdf_levels = [pdf_levels[l] for l in levels]
+    #rom_grid ? dv.levels_grid : dv.levels_obs
+    #pdf_levels = [pdf_levels[l] for l in levels]
 
-    contourmesh!(ax, dv.pdf_vol .|> trans_fun, pdf_levels .|> trans_fun; 
-        xrange=dv.xrange, yrange=dv.yrange, zrange=dv.zrange,
-        colors=[:red, :orange, :yellow], alphas=[0.5, 0.2, 0.1], specular=0.8, transparency=true,
+    c_plot = contourmesh!(ax, vol_obs, pdf_levels; 
+        xrange=@lift($dv.xrange), yrange=@lift($dv.yrange), zrange=@lift($dv.zrange),
+        colors=colors, alphas=alphas, specular=0.8, transparency=true,
         kwargs...)
 
-    return current_figure()
+
+    # Observed points: keep one persistent scatter and update its positions
+    pts_obs = Observable(Point3f[])
+    if !isempty(dv[].obs_points)
+        onany(dv, obs_samplesize) do d, n
+            n = max(Int(n), 0)
+            pts_obs[] = n == 0 ? Point3f[] :
+                        sample(d.obs_points, min(n, length(d.obs_points)))
+        end
+    end
+    sc_plot = scatter!(ax, pts_obs; color=:grey, markersize=5, alpha=0.5)
+    
+    # if obs_samplesize > 0
+    #     @info "Sampling $obs_samplesize observation points for scatter plot"
+    #     obs_sample = sample(dv.obs_points, min(obs_samplesize, length(dv.obs_points)))  
+    #     scatter!(ax, obs_sample, color=:grey, markersize=5, alpha=0.5)
+
+    # else
+    #     @info "No observation points sampled for scatter plot"
+    # end
+    return (; c_plot, sc_plot)
+end
+
+function plot3d!(dv::DensityVol; ax=current_axis(), trans_fun=log10,
+                 levels=[10,50,90], from_grid=true, obs_samplesize=0, kwargs...)
+    # wrap plain args as Observables and delegate to the reactive core
+    return plot3d!(_asobs(dv);
+                   ax = ax,
+                   trans_fun      = _asobs(trans_fun),
+                   levels         = [_asobs(Float64(l)) for l in levels],
+                   from_grid      = _asobs(from_grid),
+                   obs_samplesize = _asobs(Int(obs_samplesize)),
+                   kwargs...)
 end
 
 function demo_kde3d_est()

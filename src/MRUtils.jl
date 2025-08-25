@@ -9,4 +9,5 @@ include("PlotUtils.jl")
 include("StatUtils.jl")
 include("DataUtils.jl")
 include("AoGUtils.jl")
+include("EarthyData.jl")
 end # module MRUtils
